@@ -19,6 +19,7 @@ from pipeline.export_gis import export_shapefiles
 from pipeline.extract_features import extract_features
 from pipeline.gcp_sources import resolve_gcps
 from pipeline.georeference import georeference
+from pipeline.auto_gcps_io import save_auto_gcps
 from pipeline.ocr_gcp import save_gcp_report
 from pipeline.qa import (
     create_folium_overlay,
@@ -62,6 +63,8 @@ def run_pipeline(
     print("\n[1/7] Loading ground control points...")
     gcp_report = resolve_gcps(config, input_path, manual_gcp_path=None)
     save_gcp_report(gcp_report, output_dir / "gcp_report.json")
+    save_auto_gcps(gcp_report.gcps, output_dir)
+    print(f"  Saved auto GCPs → {output_dir / 'auto_gcps.json'}")
     print(f"  {len(gcp_report.gcps)} GCPs, RMSE={gcp_report.rmse_m:.1f}m ({gcp_report.quality_flag})")
 
     pixels = np.array([[g.pixel_x, g.pixel_y] for g in gcp_report.gcps])

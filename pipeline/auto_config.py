@@ -80,26 +80,34 @@ def discover_ground_truth_dir(ward: int, gt_root: str | Path | None = None) -> P
     return candidates[0] if candidates else None
 
 
-def discover_qgis_points(image_path: Path, gt_dir: Path | None = None) -> Path | None:
-    """Find QGIS .points file next to image or in ground truth folder."""
+def discover_qgis_points(image_path: Path, gt_dir: Path | None = None, ward: int | None = None) -> Path | None:
+    """Find QGIS .points file next to image, in ground truth, or from prior auto-run."""
     stem = image_path.stem
+    ward = ward or parse_ward_number(image_path)
     parent = image_path.parent
+    project = PROJECT_ROOT
+
     candidates = [
         parent / f"{stem}.points",
         parent / f"{image_path.name}.points",
-        parent / f"Ward_{parse_ward_number(image_path) or ''}.png.points",
     ]
+    if ward is not None:
+        candidates.extend([
+            project / "output" / f"Ward_{ward}" / "auto_gcps.points",
+            project / "output" / f"Ward_{ward}" / f"Ward_{ward}.png.points",
+        ])
     if gt_dir:
         candidates.extend([
             gt_dir / f"{stem}.points",
-            gt_dir / f"Ward_{parse_ward_number(image_path) or ''}.png.points",
-            gt_dir / f"Ward_{parse_ward_number(image_path) or ''}.points",
+            gt_dir / f"Ward_{ward}.png.points" if ward else None,
         ])
         candidates.extend(sorted(gt_dir.glob("*.points")))
 
     seen: set[Path] = set()
     for c in candidates:
-        c = c.resolve()
+        if c is None:
+            continue
+        c = Path(c).resolve()
         if c in seen:
             continue
         seen.add(c)
@@ -166,7 +174,7 @@ def build_ward_config(
 
     gt_root = project_root / paths_cfg.get("ground_truth_dir", "ground_truth")
     gt_dir = discover_ground_truth_dir(ward, gt_root)
-    qgis_points = discover_qgis_points(image_path, gt_dir)
+    qgis_points = discover_qgis_points(image_path, gt_dir, ward=ward)
     gt_shps = discover_gt_shapefiles(gt_dir, ward) if gt_dir else {"potholes": None, "drainage": None}
 
     # Merge user overrides from generated config if they exist

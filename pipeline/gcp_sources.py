@@ -9,10 +9,11 @@ from typing import Any
 import numpy as np
 from pyproj import Transformer
 
+from pipeline.auto_gcps_io import load_auto_gcps, save_auto_gcps
+from pipeline.image_gcps import build_gcps_from_image
 from pipeline.ocr_gcp import (
     GCPReport,
     GroundControlPoint,
-    build_gcps as build_ocr_gcps,
     load_manual_gcps,
     ransac_filter_gcps,
 )
@@ -164,8 +165,13 @@ def resolve_gcps(
             print(f"  Added {len(manual)} manual GCPs from {manual_gcp_path}")
 
     if source in ("ocr", "auto") and len(gcps) < min_gcps:
-        print("  Running OCR + geocoding for GCPs...")
-        ocr_report = build_ocr_gcps(image_path, config, manual_gcp_path=None)
+        print("  Building GCPs from map image (OCR + geocoding)...")
+        import cv2
+        img = cv2.imread(str(image_path))
+        if img is None:
+            raise FileNotFoundError(f"Cannot read image: {image_path}")
+        img_h, img_w = img.shape[:2]
+        ocr_report = build_gcps_from_image(str(image_path), config, img_w, img_h)
         existing = {(round(g.pixel_x), round(g.pixel_y)) for g in gcps}
         for g in ocr_report.gcps:
             key = (round(g.pixel_x), round(g.pixel_y))
@@ -175,8 +181,10 @@ def resolve_gcps(
 
     if len(gcps) < min_gcps:
         raise RuntimeError(
-            f"Insufficient GCPs ({len(gcps)}). Need at least {min_gcps}. "
-            "Provide ground_truth QGIS .points file or manual GCPs."
+            f"Insufficient GCPs ({len(gcps)}/{min_gcps}). "
+            "Could not geocode enough street labels from the map image. "
+            "Try: set GOOGLE_MAPS_API_KEY, add ground_truth/wardN/*.points, "
+            "or ensure street names are visible on the map."
         )
 
     if use_ransac and len(gcps) > min_gcps:

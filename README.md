@@ -43,7 +43,24 @@ Output goes to `output/Ward_42/` automatically.
 
 You **never** need to create `config/ward_N.yaml` or `ward_N_gcps_manual.json` by hand.
 
-## Optional: ground truth (improves accuracy)
+## No ground truth? It still works.
+
+For wards without `ground_truth/wardN/`, the pipeline:
+
+1. **Reads street names from the map** (multi-scale OCR)
+2. **Geocodes them** via OpenStreetMap (Google if `GOOGLE_MAPS_API_KEY` set)
+3. **Saves auto GCPs** to `output/Ward_N/auto_gcps.json` + `auto_gcps.points` for reuse
+4. **Runs the full pipeline** — shapefiles, CSV, validation overlay
+
+```bash
+cp Ward_42.png maps/Ward_42.png
+python -m pipeline.run maps/Ward_42.png
+# → output/Ward_42/ with all GIS files
+```
+
+Accuracy is best with 6+ street labels geocoded on the map. With only 3 GCPs (minimum), alignment works but may drift on edges — add `GOOGLE_MAPS_API_KEY` or QGIS `.points` later to improve.
+
+## Optional: ground truth (better accuracy)
 
 If you have QGIS georeferencing points or reference shapefiles, drop them in:
 

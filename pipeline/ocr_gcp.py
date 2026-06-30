@@ -170,8 +170,12 @@ def geocode_nominatim(
         data = resp.json()
         if not data:
             return None
-        lon = float(data[0]["lon"])
-        lat = float(data[0]["lat"])
+        entry = data[0]
+        display = entry.get("display_name", "").lower()
+        if "kolkata" not in display and "calcutta" not in display:
+            return None
+        lon = float(entry["lon"])
+        lat = float(entry["lat"])
         if not _in_bbox(lon, lat, geo_cfg["bbox"]):
             return None
         return lon, lat
@@ -387,8 +391,8 @@ def build_gcps(
 
     if len(gcps) < 4:
         raise RuntimeError(
-            f"Insufficient GCPs ({len(gcps)}). Need at least 4. "
-            "Add manual GCPs via config/ward_7_gcps_manual.json or check OCR/geocoding."
+            f"Insufficient GCPs ({len(gcps)}). Need at least 3–4. "
+            "The pipeline geocodes street names read from the map image automatically."
         )
 
     if not _quadrant_coverage(gcps, img_w, img_h):
