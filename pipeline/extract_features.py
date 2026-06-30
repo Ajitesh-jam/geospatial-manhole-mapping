@@ -51,11 +51,24 @@ def _combine_red_masks(img: np.ndarray, config: dict[str, Any]) -> np.ndarray:
     return cv2.bitwise_or(red1, red2)
 
 
-def _morph_clean(mask: np.ndarray, kernel_size: int = 3) -> np.ndarray:
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+def _morph_clean(
+    mask: np.ndarray,
+    kernel_size: int = 3,
+    open_size: int | None = None,
+    dilate_iterations: int = 0,
+) -> np.ndarray:
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+    )
     closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel)
-    return opened
+    if open_size and open_size > 0:
+        open_k = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (open_size, open_size)
+        )
+        closed = cv2.morphologyEx(closed, cv2.MORPH_OPEN, open_k)
+    if dilate_iterations > 0:
+        closed = cv2.dilate(closed, kernel, iterations=dilate_iterations)
+    return closed
 
 
 def _mask_to_linestrings(
@@ -180,6 +193,43 @@ def _detect_manholes(
     return points
 
 
+def _detect_manholes_from_junctions(
+    combined_mask: np.ndarray,
+    endpoint_threshold: int = 11,
+    min_dist: float = 4.0,
+) -> list[tuple[float, float, str]]:
+    """
+    Detect manholes at skeleton junctions and endpoints.
+    Catches pipe nodes on narrow roads where filled circles are too small for blob detection.
+    """
+    binary = (combined_mask > 0).astype(np.uint8)
+    if binary.sum() == 0:
+        return []
+
+    skel = skeletonize(binary > 0).astype(np.uint8)
+    kernel = np.array([[1, 1, 1], [1, 10, 1], [1, 1, 1]], dtype=np.uint8)
+    neighbor_count = cv2.filter2D(skel, -1, kernel)
+
+    nodes = np.argwhere(
+        (skel > 0)
+        & ((neighbor_count <= endpoint_threshold) | (neighbor_count >= 13))
+    )
+    if len(nodes) == 0:
+        return []
+
+    # Grid-based dedup — O(n) instead of O(n^2)
+    cell = max(min_dist, 1.0)
+    grid: dict[tuple[int, int], tuple[float, float, str]] = {}
+    for ny, nx in nodes:
+        gx = int(float(nx) // cell)
+        gy = int(float(ny) // cell)
+        key = (gx, gy)
+        if key not in grid:
+            grid[key] = (float(nx), float(ny), "junction")
+
+    return list(grid.values())
+
+
 def _merge_nearby_points(
     points: list[tuple[float, float, str]],
     merge_px: float,
@@ -302,24 +352,42 @@ def extract_features(
 
     ext_cfg = config["extraction"]
     kernel_size = ext_cfg.get("morphology_kernel_size", 3)
+    open_size = ext_cfg.get("morphology_open_size", kernel_size)
+    dilate_iters = ext_cfg.get("thin_line_dilate_iterations", 0)
     simplify_px = ext_cfg.get("drainage_simplify_px", 2.5)
 
+    def _line_mask(raw: np.ndarray) -> np.ndarray:
+        return _morph_clean(
+            raw,
+            kernel_size=kernel_size,
+            open_size=open_size,
+            dilate_iterations=dilate_iters,
+        )
+
     # Color masks
-    green_mask = _morph_clean(
-        _hsv_mask(img, config["colors"]["drainage_green"]["hsv_lower"],
-                  config["colors"]["drainage_green"]["hsv_upper"]),
-        kernel_size,
+    green_mask = _line_mask(
+        _hsv_mask(
+            img,
+            config["colors"]["drainage_green"]["hsv_lower"],
+            config["colors"]["drainage_green"]["hsv_upper"],
+        )
     )
-    red_mask = _morph_clean(_combine_red_masks(img, config), kernel_size)
-    blue_mask = _morph_clean(
-        _hsv_mask(img, config["colors"]["drainage_blue"]["hsv_lower"],
-                  config["colors"]["drainage_blue"]["hsv_upper"]),
-        kernel_size,
+    red_mask = _line_mask(_combine_red_masks(img, config))
+    blue_mask = _line_mask(
+        _hsv_mask(
+            img,
+            config["colors"]["drainage_blue"]["hsv_lower"],
+            config["colors"]["drainage_blue"]["hsv_upper"],
+        )
     )
     magenta_mask = _morph_clean(
-        _hsv_mask(img, config["colors"]["ward_boundary_magenta"]["hsv_lower"],
-                  config["colors"]["ward_boundary_magenta"]["hsv_upper"]),
-        kernel_size,
+        _hsv_mask(
+            img,
+            config["colors"]["ward_boundary_magenta"]["hsv_lower"],
+            config["colors"]["ward_boundary_magenta"]["hsv_upper"],
+        ),
+        kernel_size=kernel_size,
+        open_size=open_size,
     )
 
     # Drainage line extraction
@@ -359,8 +427,19 @@ def extract_features(
     red_mh = _detect_manholes(red_mask, "red", min_area, max_area, min_circ)
     green_mh = _detect_manholes(green_mask, "green", min_area, max_area, min_circ)
 
-    raw_points = [(x, y, c) for x, y in red_mh for c in ["red"]] + \
-                 [(x, y, c) for x, y in green_mh for c in ["green"]]
+    raw_points = [(x, y, c) for x, y in red_mh for c in ["red"]] + [
+        (x, y, c) for x, y in green_mh for c in ["green"]
+    ]
+
+    if ext_cfg.get("manholes_from_junctions", True):
+        combined = cv2.bitwise_or(green_mask, red_mask)
+        combined = cv2.bitwise_or(combined, blue_mask)
+        junction_pts = _detect_manholes_from_junctions(
+            combined,
+            endpoint_threshold=ext_cfg.get("junction_neighbor_threshold", 11),
+        )
+        raw_points.extend(junction_pts)
+
     merged_points = _merge_nearby_points(raw_points, merge_px)
 
     manholes = []

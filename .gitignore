@@ -1,4 +1,5 @@
 output/
+config/generated/
 __pycache__/
 *.pyc
 .env

@@ -100,8 +100,14 @@ def create_folium_overlay(
             popup=f"{g.street} ({g.source})<br>RMSE context GCP",
         ).add_to(m)
 
-    # Drainage lines
-    for seg in features.drainage:
+    # Drainage lines (subsample if huge — keeps HTML responsive)
+    max_lines = 3000
+    drainage_sample = features.drainage
+    if len(drainage_sample) > max_lines:
+        step = len(drainage_sample) // max_lines
+        drainage_sample = drainage_sample[::step]
+
+    for seg in drainage_sample:
         geo_coords = [_pixel_to_geo(x, y, to_geo) for x, y in seg.coords]
         if len(geo_coords) < 2:
             continue
@@ -113,16 +119,29 @@ def create_folium_overlay(
             popup=f"Seg {seg.seg_id}: {seg.pipe_class}",
         ).add_to(m)
 
-    # Manholes
-    for mh in features.manholes:
+    # Manholes — use marker cluster when count is large
+    max_mh = 5000
+    manholes = features.manholes
+    if len(manholes) > max_mh:
+        step = len(manholes) // max_mh
+        manholes = manholes[::step]
+
+    if len(manholes) > 800:
+        from folium.plugins import MarkerCluster
+        cluster = MarkerCluster(name="Manholes").add_to(m)
+        target = cluster
+    else:
+        target = m
+
+    for mh in manholes:
         lon, lat = _pixel_to_geo(mh.x, mh.y, to_geo)
         folium.CircleMarker(
             location=[lat, lon],
             radius=3,
-            color=mh.color,
+            color=mh.color if mh.color != "junction" else "orange",
             fill=True,
             popup=f"MH {mh.mh_id}" + (f" inv={mh.invert_level}" if mh.invert_level else ""),
-        ).add_to(m)
+        ).add_to(target)
 
     if features.ward_boundary is not None:
         wb_coords = [

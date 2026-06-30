@@ -148,18 +148,23 @@ def resolve_gcps(
                 source_crs=geo_cfg.get("qgis_source_crs", "EPSG:3857"),
                 target_crs=config["crs"]["output"],
             )
-            print(f"  Loaded {len(gcps)} GCPs from QGIS points file")
+            print(f"  Loaded {len(gcps)} GCPs from QGIS points: {qgis_path}")
+        elif source == "qgis_points":
+            raise FileNotFoundError(
+                f"georeferencing.source is qgis_points but no .points file found. "
+                "Place Ward_N.png.points in ground_truth/wardN/ or next to the map image."
+            )
 
-    if source in ("manual", "auto") and manual_gcp_path:
+    if source in ("manual", "auto") and manual_gcp_path and Path(manual_gcp_path).exists():
         manual = load_manual_gcps(manual_gcp_path)
         if manual:
             manual_streets = {g.street.upper() for g in manual}
             gcps = [g for g in gcps if g.street.upper() not in manual_streets]
             gcps.extend(manual)
-            print(f"  Added {len(manual)} manual GCPs")
+            print(f"  Added {len(manual)} manual GCPs from {manual_gcp_path}")
 
     if source in ("ocr", "auto") and len(gcps) < min_gcps:
-        print("  Falling back to OCR + geocoding for additional GCPs...")
+        print("  Running OCR + geocoding for GCPs...")
         ocr_report = build_ocr_gcps(image_path, config, manual_gcp_path=None)
         existing = {(round(g.pixel_x), round(g.pixel_y)) for g in gcps}
         for g in ocr_report.gcps:

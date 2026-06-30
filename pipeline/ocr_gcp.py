@@ -117,6 +117,24 @@ def match_streets(
     return matches
 
 
+def _ocr_street_candidates(detections: list[dict[str, Any]]) -> list[str]:
+    """Pull likely street-name strings directly from OCR to augment the gazetteer."""
+    keywords = ("ST", "STREET", "ROAD", "SARANI", "LANE", "LN", "CANAL", "RIVER", "MARG", "PATH")
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for det in detections:
+        text = det["text"].upper().strip()
+        if len(text) < 5 or len(text) > 60:
+            continue
+        if not any(k in text for k in keywords):
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        candidates.append(text)
+    return candidates
+
+
 def _in_bbox(lon: float, lat: float, bbox: dict[str, float]) -> bool:
     return (
         bbox["min_lon"] <= lon <= bbox["max_lon"]
@@ -334,7 +352,10 @@ def build_gcps(
     max_rmse = config["quality"].get("max_rmse_m", 50)
 
     detections = run_ocr(image_path, scale)
-    matches = match_streets(detections, config["streets"], threshold)
+    street_list = list(config.get("streets", []))
+    street_list.extend(_ocr_street_candidates(detections))
+    street_list = list(dict.fromkeys(street_list))  # dedupe preserve order
+    matches = match_streets(detections, street_list, threshold)
 
     gcps: list[GroundControlPoint] = []
     for m in matches:

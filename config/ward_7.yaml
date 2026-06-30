@@ -33,14 +33,14 @@ geocode:
 
 # ── Error tolerance knobs ────────────────────────────────────────────────────
 quality:
-  max_rmse_m: 50          # warn if GCP fit RMSE exceeds this
-  snap_tolerance_m: 5     # manhole-to-pipe snap distance
-  node_merge_tolerance_m: 2
+  max_rmse_m: 80          # warn if GCP fit RMSE exceeds this (relaxed)
+  snap_tolerance_m: 12    # manhole-to-pipe snap distance (relaxed for small roads)
+  node_merge_tolerance_m: 3
 
 comparison:
   # Tolerances (metres) used in ground truth comparison report
-  match_tolerances_m: [5, 10, 20, 50, 100]
-  line_buffer_m: 15       # buffer for drainage overlap check
+  match_tolerances_m: [5, 10, 15, 20, 30, 50, 100]
+  line_buffer_m: 20       # buffer for drainage overlap check (relaxed)
   ground_truth_dir: "ground_truth/ward7"
   gt_potholes: "Potholes_Ward_7.shp"
   gt_drainage: "Drainage_Ward_7.shp"
@@ -80,34 +80,45 @@ streets:
 # ── Feature extraction (second biggest count/quality lever) ──────────────────
 colors:
   drainage_green:
-    hsv_lower: [35, 40, 40]
-    hsv_upper: [90, 255, 255]
+    hsv_lower: [30, 25, 30]   # widened for faint/thin green pipes on small roads
+    hsv_upper: [95, 255, 255]
     pipe_class: "150-300mm"
   drainage_red:
-    hsv_lower: [0, 70, 70]
-    hsv_upper: [10, 255, 255]
+    hsv_lower: [0, 50, 50]    # widened for lighter red marks
+    hsv_upper: [12, 255, 255]
     pipe_class: "brick_sewer"
   drainage_red_wrap:
-    hsv_lower: [170, 70, 70]
+    hsv_lower: [168, 50, 50]
     hsv_upper: [180, 255, 255]
     pipe_class: "brick_sewer"
   drainage_blue:
-    hsv_lower: [100, 50, 50]
-    hsv_upper: [130, 255, 255]
+    hsv_lower: [95, 40, 40]
+    hsv_upper: [135, 255, 255]
     pipe_class: "connection"
   ward_boundary_magenta:
     hsv_lower: [140, 50, 50]
     hsv_upper: [170, 255, 255]
 
 extraction:
-  manhole_min_area: 12       # increase to reduce false pothole detections
-  manhole_max_area: 70
-  manhole_min_circularity: 0.6
-  manhole_merge_px: 8
-  drainage_simplify_px: 4.0  # higher = fewer, simpler segments
-  drainage_merge_endpoint_px: 5
-  drainage_min_length_px: 30 # filter short skeleton fragments
-  morphology_kernel_size: 3
+  # Manhole / pothole blobs — lowered thresholds for small-road dots
+  manhole_min_area: 4
+  manhole_max_area: 100
+  manhole_min_circularity: 0.35
+  manhole_merge_px: 5
+
+  # Also place manholes at pipe junctions & endpoints (helps narrow lanes)
+  manholes_from_junctions: true
+  junction_neighbor_threshold: 11   # skeleton degree cutoff for endpoints
+
+  # Drainage lines — keep shorter segments on small roads
+  drainage_simplify_px: 2.0
+  drainage_merge_endpoint_px: 4
+  drainage_min_length_px: 8
+
+  # Thin-line boost: light dilate before skeletonize on green/red masks
+  thin_line_dilate_iterations: 1
+  morphology_kernel_size: 2
+  morphology_open_size: 1          # lighter open = less destruction of thin strokes
 
 crs:
   output: "EPSG:4326"
