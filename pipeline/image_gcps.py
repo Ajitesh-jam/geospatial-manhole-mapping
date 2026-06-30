@@ -3,21 +3,27 @@
 from __future__ import annotations
 
 import re
+import tempfile
+from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 
 from pipeline.ocr_gcp import (
     GCPReport,
     GroundControlPoint,
-    _fit_affine,
     _compute_residuals,
+    _fit_affine,
     _quadrant_coverage,
+    geocode_freeform,
     geocode_street,
     match_streets,
     ransac_filter_gcps,
     run_ocr,
 )
+
+_WARD_RE = re.compile(r"(?i)WARD[\s.\-]*(?:NO\.?\s*:?\s*)?(\d+)")
 
 # Single-word OCR fragments that geocode to wrong places
 _GEOCODE_STOPWORDS = frozenset({
@@ -32,11 +38,64 @@ _STREET_SUFFIX = re.compile(
 )
 
 
+def _ocr_scales_for_image(img_w: int, img_h: int) -> tuple[float, list[float]]:
+    """Small maps get upscaled; return (upscale_factor, ocr_scales)."""
+    max_dim = max(img_w, img_h)
+    if max_dim < 2500:
+        upscale = min(3.0, 4000 / max_dim)
+        return upscale, [0.75, 1.0]
+    if max_dim < 4500:
+        upscale = min(2.0, 4000 / max_dim)
+        return upscale, [0.5, 0.75, 1.0]
+    return 1.0, [0.35, 0.5, 0.75]
+
+
+def run_ocr_adaptive(
+    image_path: str,
+    img_w: int,
+    img_h: int,
+) -> list[dict[str, Any]]:
+    """OCR with auto-upscale for small maps; coords normalized to original pixels."""
+    upscale, scales = _ocr_scales_for_image(img_w, img_h)
+    ocr_path = image_path
+    temp_file: Path | None = None
+
+    if upscale > 1.05:
+        img = cv2.imread(image_path)
+        up = cv2.resize(img, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        temp_file = Path(tmp.name)
+        cv2.imwrite(str(temp_file), up)
+        ocr_path = str(temp_file)
+        print(f"  Small map detected — upscaling {upscale:.1f}x for OCR")
+
+    merged: dict[tuple[int, int, str], dict[str, Any]] = {}
+    for scale in scales:
+        for det in run_ocr(ocr_path, scale):
+            det = {
+                **det,
+                "pixel_x": det["pixel_x"] / upscale,
+                "pixel_y": det["pixel_y"] / upscale,
+            }
+            key = (round(det["pixel_x"] / 15), round(det["pixel_y"] / 15), det["text"].upper())
+            if key not in merged or det["confidence"] > merged[key]["confidence"]:
+                merged[key] = det
+
+    if temp_file and temp_file.exists():
+        temp_file.unlink()
+
+    return list(merged.values())
+
+
 def run_ocr_multiscale(
     image_path: str,
     scales: list[float] | None = None,
+    img_w: int = 0,
+    img_h: int = 0,
 ) -> list[dict[str, Any]]:
-    scales = scales or [0.25, 0.35, 0.5]
+    if img_w and img_h:
+        return run_ocr_adaptive(image_path, img_w, img_h)
+    scales = scales or [0.35, 0.5, 0.75]
     merged: dict[tuple[int, int, str], dict[str, Any]] = {}
     for scale in scales:
         for det in run_ocr(image_path, scale):
@@ -171,6 +230,116 @@ def _normalize_label(text: str) -> list[str]:
     return out
 
 
+def try_geocode_label(label: str, config: dict[str, Any]) -> tuple[float, float, str] | None:
+    """Try many query variants against Nominatim / Google."""
+    label = label.strip(" ;:.,-")
+    if len(label) < 4:
+        return None
+
+    city = config.get("ward", {}).get("city", config.get("city", "Kolkata"))
+    state = config.get("ward", {}).get("state", config.get("state", "West Bengal"))
+
+    queries: list[str] = []
+    for variant in _normalize_label(label):
+        queries.append(variant)
+        queries.append(f"{variant}, {city}, {state}, India")
+        if "ROAD" not in variant.upper() and "LANE" not in variant.upper():
+            queries.append(f"{variant} Road, {city}, {state}, India")
+            queries.append(f"{variant} Lane, {city}, {state}, India")
+            queries.append(f"{variant} Sarani, {city}, {state}, India")
+
+    m = _WARD_RE.search(label)
+    if m:
+        n = m.group(1)
+        queries.append(f"Kolkata Ward {n}, {city}, {state}, India")
+        queries.append(f"Ward {n} {city}")
+
+    seen_q: set[str] = set()
+    for q in queries:
+        q = q.strip()
+        if not q or q in seen_q:
+            continue
+        seen_q.add(q)
+        hit = geocode_street(q, config) or geocode_freeform(q, config)
+        if hit:
+            return hit
+    return None
+
+
+def _is_landmark_token(text: str) -> bool:
+    t = text.upper().strip(" ;:.,-")
+    if len(t) < 5 or t in _GEOCODE_STOPWORDS:
+        return False
+    if sum(c.isdigit() for c in t) / max(len(t), 1) > 0.3:
+        return False
+    alpha = sum(c.isalpha() for c in t)
+    return alpha / max(len(t), 1) >= 0.65
+
+
+def _ward_label_detections(
+    detections: list[dict[str, Any]],
+    ward_num: int,
+    config: dict[str, Any],
+) -> list[GroundControlPoint]:
+    gcps: list[GroundControlPoint] = []
+    city = config.get("ward", {}).get("city", "Kolkata")
+    state = config.get("ward", {}).get("state", "West Bengal")
+
+    for det in detections:
+        text = det["text"]
+        m = _WARD_RE.search(text)
+        if not m or int(m.group(1)) != ward_num:
+            continue
+        q = f"Kolkata Ward {ward_num}, {city}, {state}, India"
+        geo = geocode_freeform(q, config) or geocode_street(f"Ward {ward_num}", config)
+        if geo:
+            lon, lat, source = geo
+            gcps.append(GroundControlPoint(
+                pixel_x=det["pixel_x"], pixel_y=det["pixel_y"],
+                lon=lon, lat=lat, street=f"Ward {ward_num}",
+                source=source, ocr_text=text,
+            ))
+            break
+    return gcps
+
+
+def _landmark_geocode_pass(
+    detections: list[dict[str, Any]],
+    config: dict[str, Any],
+    existing: set[tuple[int, int]],
+) -> list[GroundControlPoint]:
+    """Geocode place-name tokens and merged labels (relaxed rules)."""
+    gcps: list[GroundControlPoint] = []
+    seen_geo: set[tuple[int, int]] = set()
+
+    candidates: list[dict[str, Any]] = []
+    for det in detections:
+        text = det["text"].strip()
+        if _is_landmark_token(text) or _is_geocodable_label(text):
+            candidates.append(det)
+        elif len(text) >= 8 and sum(c.isalpha() for c in text) / len(text) > 0.6:
+            candidates.append(det)
+
+    for cand in candidates:
+        key = (round(cand["pixel_x"]), round(cand["pixel_y"]))
+        if key in existing:
+            continue
+        geo = try_geocode_label(cand["text"], config)
+        if geo is None:
+            continue
+        lon, lat, source = geo
+        gkey = (round(lon, 4), round(lat, 4))
+        if gkey in seen_geo:
+            continue
+        seen_geo.add(gkey)
+        gcps.append(GroundControlPoint(
+            pixel_x=cand["pixel_x"], pixel_y=cand["pixel_y"],
+            lon=lon, lat=lat, street=cand["text"],
+            source=source, ocr_text=cand["text"],
+        ))
+    return gcps
+
+
 def _geocode_candidates(
     candidates: list[dict[str, Any]],
     config: dict[str, Any],
@@ -180,34 +349,36 @@ def _geocode_candidates(
 
     for cand in candidates:
         raw = cand.get("matched_street") or cand["text"]
-        labels = _normalize_label(raw)
-
-        for label in labels:
-            if not _is_geocodable_label(label):
-                continue
-            geo = geocode_street(label, config)
-            if geo is None:
-                continue
-
-            lon, lat, source = geo
-            key = (round(lon, 4), round(lat, 4))
-            if key in seen_geo:
-                break
-
-            seen_geo.add(key)
-            gcps.append(
-                GroundControlPoint(
-                    pixel_x=cand["pixel_x"],
-                    pixel_y=cand["pixel_y"],
-                    lon=lon,
-                    lat=lat,
-                    street=label,
-                    source=source,
-                    ocr_text=cand.get("text", raw),
-                )
-            )
-            break
+        geo = try_geocode_label(raw, config)
+        if geo is None:
+            continue
+        lon, lat, source = geo
+        key = (round(lon, 4), round(lat, 4))
+        if key in seen_geo:
+            continue
+        seen_geo.add(key)
+        gcps.append(GroundControlPoint(
+            pixel_x=cand["pixel_x"], pixel_y=cand["pixel_y"],
+            lon=lon, lat=lat, street=raw,
+            source=source, ocr_text=cand.get("text", raw),
+        ))
     return gcps
+
+
+def _append_unique_gcps(
+    gcps: list[GroundControlPoint],
+    new: list[GroundControlPoint],
+) -> None:
+    existing_px = {(round(g.pixel_x), round(g.pixel_y)) for g in gcps}
+    existing_geo = {(round(g.lon, 4), round(g.lat, 4)) for g in gcps}
+    for g in new:
+        px = (round(g.pixel_x), round(g.pixel_y))
+        geo = (round(g.lon, 4), round(g.lat, 4))
+        if px in existing_px or geo in existing_geo:
+            continue
+        gcps.append(g)
+        existing_px.add(px)
+        existing_geo.add(geo)
 
 
 def _spatial_outlier_filter(
@@ -246,11 +417,11 @@ def build_gcps_from_image(
     """
     geo_cfg = config["geocode"]
     threshold = geo_cfg.get("fuzzy_match_threshold", 75)
-    min_gcps = config.get("georeferencing", {}).get("min_gcps", 4)
+    min_gcps = config.get("georeferencing", {}).get("min_gcps", 3)
     max_rmse = config["quality"].get("max_rmse_m", 80)
+    ward_num = config.get("ward", {}).get("number")
 
-    scales = config.get("ocr", {}).get("scales", [0.25, 0.35, 0.5])
-    raw = run_ocr_multiscale(image_path, scales)
+    raw = run_ocr_multiscale(image_path, img_w=img_w, img_h=img_h)
     merged = merge_ocr_fragments(raw)
     all_dets = raw + merged
 
@@ -258,25 +429,30 @@ def build_gcps_from_image(
     street_list.extend(_ocr_street_candidates(all_dets))
     street_list = list(dict.fromkeys(street_list))
 
+    gcps: list[GroundControlPoint] = []
+
+    # Pass 0: ward label on map (e.g. WARD-16)
+    if ward_num:
+        _append_unique_gcps(gcps, _ward_label_detections(raw, ward_num, config))
+
     # Pass 1: gazetteer fuzzy match
-    matches = _filter_match_quality(
-        match_streets(all_dets, street_list, threshold)
-    )
-    gcps = _geocode_candidates(matches, config)
+    matches = _filter_match_quality(match_streets(all_dets, street_list, threshold))
+    _append_unique_gcps(gcps, _geocode_candidates(matches, config))
 
-    # Pass 2: direct geocode merged OCR labels (lower threshold)
+    # Pass 2: merged OCR labels
     if len(gcps) < min_gcps:
-        direct = [{"text": d["text"], **d} for d in merged if _is_geocodable_label(d["text"])]
-        existing_streets = {g.street.upper() for g in gcps}
-        direct = [d for d in direct if d["text"].upper() not in existing_streets]
-        gcps.extend(_geocode_candidates(direct, config))
+        direct = [{"text": d["text"], **d} for d in merged]
+        _append_unique_gcps(gcps, _geocode_candidates(direct, config))
 
-    # Pass 3: retry with lower fuzzy threshold
+    # Pass 3: landmark / relaxed token geocoding (HEDUA, BARTALA, etc.)
     if len(gcps) < min_gcps:
-        loose = _filter_match_quality(match_streets(all_dets, street_list, threshold=60))
         existing = {(round(g.pixel_x), round(g.pixel_y)) for g in gcps}
-        loose = [m for m in loose if (round(m["pixel_x"]), round(m["pixel_y"])) not in existing]
-        gcps.extend(_geocode_candidates(loose, config))
+        _append_unique_gcps(gcps, _landmark_geocode_pass(all_dets, config, existing))
+
+    # Pass 4: lower fuzzy threshold
+    if len(gcps) < min_gcps:
+        loose = _filter_match_quality(match_streets(all_dets, street_list, threshold=55))
+        _append_unique_gcps(gcps, _geocode_candidates(loose, config))
 
     gcps = _spatial_outlier_filter(gcps)
 

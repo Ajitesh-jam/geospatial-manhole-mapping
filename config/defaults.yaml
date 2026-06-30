@@ -65,8 +65,15 @@ streets:
   - RIVER HOOGHLY
   - HOOGHLY RIVER
   - BIDHAN SARANI
-  - APC ROAD
-  - APC RD
+  - HEDUA
+  - BARTALA
+  - CHITPUR
+  - SHYAMBAZAR
+  - KARBALA
+  - NERODE
+  - KESHAB CHANDRA
+  - RAJA RAJKRISHNA SARANI
+  - CHANDI CHOWK
 
 colors:
   drainage_green:

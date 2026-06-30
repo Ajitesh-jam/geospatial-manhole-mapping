@@ -227,6 +227,53 @@ def geocode_street(
     return None
 
 
+def geocode_freeform(
+    query: str,
+    config: dict[str, Any],
+) -> tuple[float, float, str] | None:
+    """Geocode an arbitrary place query string via Nominatim / Google."""
+    delay = config["geocode"].get("request_delay_sec", 1.1)
+    geo_cfg = config["geocode"]
+    params = {"q": query, "format": "json", "limit": 1}
+    headers = {"User-Agent": geo_cfg["user_agent"]}
+    try:
+        resp = requests.get(
+            geo_cfg["nominatim_url"], params=params, headers=headers, timeout=30,
+        )
+        resp.raise_for_status()
+        if not resp.text.strip():
+            return None
+        data = resp.json()
+        if not data:
+            return None
+        entry = data[0]
+        display = entry.get("display_name", "").lower()
+        if "kolkata" not in display and "calcutta" not in display:
+            return None
+        lon, lat = float(entry["lon"]), float(entry["lat"])
+        bbox = geo_cfg["bbox"]
+        if not (bbox["min_lon"] <= lon <= bbox["max_lon"] and bbox["min_lat"] <= lat <= bbox["max_lat"]):
+            return None
+        time.sleep(delay)
+        return lon, lat, "nominatim"
+    except (requests.RequestException, KeyError, ValueError, IndexError, json.JSONDecodeError):
+        pass
+
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+    if api_key and googlemaps is not None:
+        try:
+            client = googlemaps.Client(key=api_key)
+            results = client.geocode(query)
+            if results:
+                loc = results[0]["geometry"]["location"]
+                lon, lat = loc["lng"], loc["lat"]
+                if _in_bbox(lon, lat, config["geocode"]["bbox"]):
+                    return lon, lat, "google"
+        except Exception:
+            pass
+    return None
+
+
 def _haversine_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
     r = 6371000.0
     phi1, phi2 = np.radians(lat1), np.radians(lat2)
